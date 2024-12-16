@@ -42,7 +42,7 @@ class PongController {
 		lastRequestTime = currentTime;
 		requestCount.incrementAndGet();
 
-		logResult("Normal response.");
+		logResult("Pong Respond.");
 		// Simulate processing delay and decrement request count after processing
 		return Mono.just("World")
 				.delayElement(Duration.ofSeconds(1))

@@ -35,8 +35,8 @@ public class PingApplication {
 
 			Flux.interval(Duration.ofMillis(1000))
 					.flatMap(tick -> sendPing(client).subscribeOn(Schedulers.boundedElastic()))
-					.subscribe(result -> System.out.println("Result: " + result),
-							error -> System.err.println("Error: " + error.getMessage()));
+					.subscribe(result -> logResult("Result: " + result),
+							error -> logResult("Error: " + error.getMessage()));
 		} catch (Exception e) {
 			logResult("Error reading/writing count: " + e.getMessage());
 		}
@@ -47,7 +47,7 @@ public class PingApplication {
 			logResult("Attempting to send request...");
 			int currentCount = readCountFromFile();
 
-			System.out.println("Current Count: " + currentCount);
+			logResult("Current Count: " + currentCount);
 			if (currentCount < 2) {
 				writeCountToFile(currentCount + 1);
 				try {
@@ -77,11 +77,10 @@ public class PingApplication {
 							return Mono.just("Throttled");
 						});
 			} else {
-				logResult("Rate limit exceeded, request not sent.");
+				logResult("Request not send as being “rate limited”.");
 				return Mono.just("Rate Limited");
 			}
 		} catch (Exception e) {
-			logResult("Error handling rate limit: " + e.getMessage());
 			e.printStackTrace();
 			return Mono.just("Error handling rate limit");
 		}

@@ -9,10 +9,12 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-import java.io.RandomAccessFile;
-import java.nio.channels.FileLock;
+import java.io.IOException;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.Files;
 import java.time.Duration;
+import java.util.List;
 
 @SpringBootApplication
 public class PingApplication {
@@ -29,20 +31,31 @@ public class PingApplication {
 
 	private void startPinging() {
 		WebClient client = WebClient.create();
-		// 每1000毫秒发出一个信号，直接发送请求
-		Flux.interval(Duration.ofMillis(1000)) // 每1000毫秒发出一个信号
-				.flatMap(tick -> sendPing(client).subscribeOn(Schedulers.boundedElastic()))
-				.subscribe(result -> System.out.println("Result: " + result),
-						error -> System.err.println("Error: " + error.getMessage()));
+		try {
+
+			Flux.interval(Duration.ofMillis(1000))
+					.flatMap(tick -> sendPing(client).subscribeOn(Schedulers.boundedElastic()))
+					.subscribe(result -> System.out.println("Result: " + result),
+							error -> System.err.println("Error: " + error.getMessage()));
+		} catch (Exception e) {
+			logResult("Error reading/writing count: " + e.getMessage());
+		}
 	}
 
 	private Mono<String> sendPing(WebClient client) {
-		try (RandomAccessFile file = new RandomAccessFile(Paths.get(LOCK_FILE).toFile(), "rw");
-			 FileLock lock = file.getChannel().lock()) {
+		try {
+			logResult("Attempting to send request...");
+			int currentCount = readCountFromFile();
 
-			logResult("Attempting to acquire lock...");
-			if (lock != null) {
-				logResult("Lock acquired.");
+			System.out.println("Current Count: " + currentCount);
+			if (currentCount < 2) {
+				writeCountToFile(currentCount + 1);
+				try {
+					Thread.sleep(1000);
+				} catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					logResult("error: " + e.getMessage());
+				}
 				return client.get()
 						.uri(PONG_URL)
 						.retrieve()
@@ -54,19 +67,48 @@ public class PingApplication {
 							return Mono.error(new RuntimeException("Client error: " + response.statusCode()));
 						})
 						.bodyToMono(String.class)
-						.doOnNext(response -> logResult("Request sent & Pong Respond: " + response))
+						.doOnNext(response -> {
+							logResult("Request sent & Pong Respond: " + response);
+							decrementCount();
+						})
 						.onErrorResume(e -> {
 							logResult("Request sent & Pong throttled it.");
+							decrementCount();
 							return Mono.just("Throttled");
 						});
 			} else {
-				System.out.println("Lock not acquired.");
-				logResult("Request not sent as being rate limited.");
+				logResult("Rate limit exceeded, request not sent.");
 				return Mono.just("Rate Limited");
 			}
 		} catch (Exception e) {
-			return Mono.error(e);
+			logResult("Error handling rate limit: " + e.getMessage());
+			e.printStackTrace();
+			return Mono.just("Error handling rate limit");
 		}
+	}
+
+	private void decrementCount() {
+		try {
+			int currentCount = readCountFromFile();
+			if (currentCount > 0) {
+				writeCountToFile(currentCount - 1);
+			}
+		} catch (IOException e) {
+			logResult("Error decrementing count: " + e.getMessage());
+		}
+	}
+
+	private int readCountFromFile() throws IOException {
+		// 检查文件是否存在，如果不存在则创建
+		if (!Files.exists(Paths.get(LOCK_FILE))) {
+			Files.createFile(Paths.get(LOCK_FILE));
+		}
+		List<String> lines = Files.readAllLines(Paths.get(LOCK_FILE));
+		return lines.isEmpty() ? 0 : Integer.parseInt(lines.get(0));
+	}
+
+	private void writeCountToFile(int count) throws IOException {
+		Files.write(Paths.get(LOCK_FILE), String.valueOf(count).getBytes(), StandardOpenOption.WRITE);
 	}
 
 	private void logResult(String message) {

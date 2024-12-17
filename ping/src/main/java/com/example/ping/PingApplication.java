@@ -10,23 +10,34 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.Files;
 import java.time.Duration;
-import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
+import jakarta.annotation.PostConstruct;
 
 @SpringBootApplication
 public class PingApplication {
 
-	// URL of the Pong service
-	private static final String PONG_URL = "http://localhost:8080/pong";
-	// File used for rate limiting across processes
-	private static final String LOCK_FILE = "C:\\Users\\levig\\Desktop\\Projects\\PingPong\\rate_limit.lock";
+	@Value("${pong.url}")
+	private String PONG_URL;
+
+	@Value("${lock.file}")
+	private String LOCK_FILE;
+
+	@Value("${lock.file2}")
+	private String LOCK_FILE_2;
 
 	public static void main(String[] args) {
 		SpringApplication.run(PingApplication.class, args);
-		new PingApplication().startPinging();
+	}
+
+	@PostConstruct
+	private void init() {
+		startPinging();
 	}
 
 	private void startPinging() {
@@ -45,17 +56,7 @@ public class PingApplication {
 	private Mono<String> sendPing(WebClient client) {
 		try {
 			logResult("Attempting to send request...");
-			int currentCount = readCountFromFile();
-
-			logResult("Current Count: " + currentCount);
-			if (currentCount < 2) {
-				writeCountToFile(currentCount + 1);
-				try {
-					Thread.sleep(1000);
-				} catch (InterruptedException e) {
-					Thread.currentThread().interrupt();
-					logResult("error: " + e.getMessage());
-				}
+			if (tryLockFile(LOCK_FILE) || tryLockFile(LOCK_FILE_2)) {
 				return client.get()
 						.uri(PONG_URL)
 						.retrieve()
@@ -69,15 +70,16 @@ public class PingApplication {
 						.bodyToMono(String.class)
 						.doOnNext(response -> {
 							logResult("Request sent & Pong Respond: " + response);
-							decrementCount();
 						})
 						.onErrorResume(e -> {
 							logResult("Request sent & Pong throttled it.");
-							decrementCount();
+							if (!(e instanceof RuntimeException && e.getMessage().equals("Throttled"))) {
+								e.printStackTrace();
+							}
 							return Mono.just("Throttled");
 						});
 			} else {
-				logResult("Request not send as being “rate limited”.");
+				logResult("Request not sent as being 'rate limited");
 				return Mono.just("Rate Limited");
 			}
 		} catch (Exception e) {
@@ -86,28 +88,26 @@ public class PingApplication {
 		}
 	}
 
-	private void decrementCount() {
+	private boolean tryLockFile(String lockFilePath) {
 		try {
-			int currentCount = readCountFromFile();
-			if (currentCount > 0) {
-				writeCountToFile(currentCount - 1);
+			java.nio.file.Path path = Paths.get(lockFilePath);
+			Files.createDirectories(path.getParent());
+			
+			FileChannel channel = FileChannel.open(path, 
+				StandardOpenOption.CREATE, 
+				StandardOpenOption.WRITE);
+			FileLock lock = channel.tryLock();
+			if (lock != null) {
+				Thread.sleep(1000); // Hold the lock file for 1 second
+				lock.release();
+				channel.close();
+				return true;
 			}
-		} catch (IOException e) {
-			logResult("Error decrementing count: " + e.getMessage());
+			channel.close();
+		} catch (IOException | InterruptedException e) {
+			logResult("Error locking file: " + e.getMessage());
 		}
-	}
-
-	private int readCountFromFile() throws IOException {
-		// 检查文件是否存在，如果不存在则创建
-		if (!Files.exists(Paths.get(LOCK_FILE))) {
-			Files.createFile(Paths.get(LOCK_FILE));
-		}
-		List<String> lines = Files.readAllLines(Paths.get(LOCK_FILE));
-		return lines.isEmpty() ? 0 : Integer.parseInt(lines.get(0));
-	}
-
-	private void writeCountToFile(int count) throws IOException {
-		Files.write(Paths.get(LOCK_FILE), String.valueOf(count).getBytes(), StandardOpenOption.WRITE);
+		return false;
 	}
 
 	private void logResult(String message) {

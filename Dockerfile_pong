@@ -1,0 +1,3 @@
+FROM openjdk:17-jdk-alpine
+COPY /pong/build/libs/pong-1.0.0.jar /app/pong.jar
+ENTRYPOINT ["java", "-jar", "/app/pong.jar"]

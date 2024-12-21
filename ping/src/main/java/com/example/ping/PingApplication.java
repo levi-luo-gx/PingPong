@@ -61,20 +61,33 @@ public class PingApplication {
 	}
 
 	private Mono<Void> releaseLock(String lockName) {
-		return Mono.from(lockCollection.deleteOne(Filters.eq("_id", lockName)))
+		return Mono.delay(Duration.ofSeconds(1))
+				.then(Mono.from(lockCollection.deleteOne(Filters.eq("_id", lockName))))
 				.then();
 	}
 
 	private Mono<String> sendPing(WebClient client) {
+
 		return tryLock("pingLock1")
 				.flatMap(locked1 -> {
 					if (locked1) {
+						logResult("acquired lock1: " + locked1);
+
+						releaseLock("pingLock1")
+							.doOnSuccess(result -> logResult("lock1 released."))
+							.subscribe();
+
 						return Mono.just("pingLock1");
 					} else {
 						return tryLock("pingLock2")
 								.flatMap(locked2 -> {
-									// logResult("pingLock2: " + locked2);
 									if (locked2) {
+
+										releaseLock("pingLock2")
+											.doOnSuccess(result -> logResult("lock2 released."))
+											.subscribe();
+
+										logResult("acquired lock2: "+ locked2);
 										return Mono.just("pingLock2");
 									} else {
 										logResult("Request not sent as being 'rate limited");
@@ -89,12 +102,7 @@ public class PingApplication {
 								.uri(PONG_URL)
 								.retrieve()
 								.bodyToMono(String.class)
-								.doOnNext(response -> logResult("Request sent & Pong Respond: " + response))
-								.doFinally(signalType -> 
-									Mono.delay(Duration.ofMillis(500))
-										.then(releaseLock(lockedName))
-										.subscribe()
-								)
+								.doOnNext(response -> logResult(String.format("Request sent & Pong Respond: %s", response)))
 								.onErrorResume(e -> {
 									logResult("Request sent & received 429 Too Many Requests.");
 									return Mono.just("Throttled");
@@ -106,8 +114,8 @@ public class PingApplication {
 	}
 
 	private void logResult(String message) {
-		// Implement logging logic here
-		System.out.println(message);
+		String timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new java.util.Date());
+		System.out.println(String.format("[%s] %s",  timestamp, message));
 	}
 
 }

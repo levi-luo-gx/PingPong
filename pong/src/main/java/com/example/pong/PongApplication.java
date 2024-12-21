@@ -50,7 +50,7 @@ class PongController {
 	}
 
 	private void logResult(String message) {
-		// Implement logging logic here
-		System.out.println(message);
+		String timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new java.util.Date());
+		System.out.println(String.format("[%s] %s",  timestamp, message));
 	}
 }

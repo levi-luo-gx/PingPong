@@ -27,7 +27,11 @@ public class PingApplication {
     private String mongodbUri;
 	private MongoClient mongoClient;
 	private MongoCollection<Document> lockCollection;
-	
+
+	private WebClient webClient;
+	public PingApplication() {
+		this.webClient = WebClient.create();
+	}
 
 	public static void main(String[] args) {
 		SpringApplication.run(PingApplication.class, args);
@@ -35,18 +39,24 @@ public class PingApplication {
 
 	@PostConstruct
 	private void init() {
-		System.out.println("Connecting to MongoDB at: " + mongodbUri);
-		mongoClient = MongoClients.create(mongodbUri);
-		lockCollection = mongoClient.getDatabase("ping").getCollection("locks");
+		logResult("Connecting to MongoDB at: " + mongodbUri);
+		try {
+			mongoClient = MongoClients.create(mongodbUri);
+			lockCollection = mongoClient.getDatabase("ping").getCollection("locks");
+			logResult("Successfully connected to MongoDB.");
+		} catch (Exception e) {
+			logResult("Failed to connect to MongoDB: " + e.getMessage());
+			throw new IllegalArgumentException("The connection string is invalid", e);
+		}
 		startPinging();
 	}
 
 	private void startPinging() {
-		WebClient client = WebClient.create();
+//		WebClient client = WebClient.create();
 		try {
-
+			logResult("Starting pinging process.");
 			Flux.interval(Duration.ofMillis(1000))
-					.flatMap(tick -> sendPing(client).subscribeOn(Schedulers.boundedElastic()))
+					.flatMap(tick -> sendPing(webClient).subscribeOn(Schedulers.boundedElastic()))
 					.subscribe(result -> logResult("Result: " + result),
 							error -> logResult("Error: " + error.getMessage()));
 		} catch (Exception e) {
@@ -61,43 +71,21 @@ public class PingApplication {
 	}
 
 	private Mono<Void> releaseLock(String lockName) {
+		if (lockCollection == null) {
+			return Mono.error(new IllegalStateException("Lock collection is not initialized"));
+		}
 		return Mono.delay(Duration.ofSeconds(1))
 				.then(Mono.from(lockCollection.deleteOne(Filters.eq("_id", lockName))))
 				.then();
 	}
 
 	private Mono<String> sendPing(WebClient client) {
-
-		return tryLock("pingLock1")
-				.flatMap(locked1 -> {
-					if (locked1) {
-						logResult("acquired lock1: " + locked1);
-
-						releaseLock("pingLock1")
-							.doOnSuccess(result -> logResult("lock1 released."))
-							.subscribe();
-
-						return Mono.just("pingLock1");
-					} else {
-						return tryLock("pingLock2")
-								.flatMap(locked2 -> {
-									if (locked2) {
-
-										releaseLock("pingLock2")
-											.doOnSuccess(result -> logResult("lock2 released."))
-											.subscribe();
-
-										logResult("acquired lock2: "+ locked2);
-										return Mono.just("pingLock2");
-									} else {
-										logResult("Request not sent as being 'rate limited");
-										return Mono.just("Rate Limited");
-									}
-								});
-					}
-				})
+		logResult("Attempting to send ping.");
+		return tryAcquireLock("pingLock1")
+				.switchIfEmpty(tryAcquireLock("pingLock2"))
+				.defaultIfEmpty("Rate Limited")
 				.flatMap(lockedName -> {
-					if (lockedName != null && !lockedName.equals("Rate Limited")) {
+					if (!lockedName.equals("Rate Limited")) {
 						return client.get()
 								.uri(PONG_URL)
 								.retrieve()
@@ -108,7 +96,24 @@ public class PingApplication {
 									return Mono.just("Throttled");
 								});
 					} else {
+						logResult("Rate Limited, no lock acquired.");
 						return Mono.just("Rate Limited");
+					}
+				});
+	}
+
+	private Mono<String> tryAcquireLock(String lockName) {
+		return tryLock(lockName)
+				.flatMap(locked -> {
+					if (locked) {
+						logResult("Acquired lock: " + lockName);
+						releaseLock(lockName)
+							.doOnSuccess(result -> logResult(lockName + " released."))
+							.subscribe();
+						return Mono.just(lockName);
+					} else {
+						logResult("Failed to acquire lock: " + lockName);
+						return Mono.empty();
 					}
 				});
 	}

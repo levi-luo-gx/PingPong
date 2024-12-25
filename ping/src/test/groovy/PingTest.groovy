@@ -1,5 +1,6 @@
 package com.example.ping
 
+import org.bson.Document
 import spock.lang.Specification
 import org.springframework.web.reactive.function.client.WebClient
 import reactor.core.publisher.Mono
@@ -14,37 +15,39 @@ import com.mongodb.reactivestreams.client.MongoClient;
 import reactor.test.StepVerifier
 import java.time.Duration
 import reactor.core.publisher.Flux
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
 
 class PingTest extends Specification {
 
 
-    def "test tryLock success"() {
-        given:
-        def lockCollection = Mock(MongoCollection)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
+   def "test tryLock success"() {
+       given:
+       def lockCollection = Mock(MongoCollection)
+       def pingApplication = new PingApplication()
+       pingApplication.lockCollection = lockCollection
 
-        when:
-        def result = pingApplication.tryLock("testLock").block()
+       when:
+       def result = pingApplication.tryLock("testLock").block()
 
-        then:
-        1 * lockCollection.insertOne(_) >> Mono.just(Mock(InsertOneResult))
-        result == true
-    }
+       then:
+       1 * lockCollection.insertOne(_) >> Mono.just(Mock(InsertOneResult))
+       result == true
+   }
 
-    def "test tryLock failure"() {
-        given:
-        def lockCollection = Mock(MongoCollection)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
+   def "test tryLock failure"() {
+       given:
+       def lockCollection = Mock(MongoCollection)
+       def pingApplication = new PingApplication()
+       pingApplication.lockCollection = lockCollection
 
-        when:
-        def result = pingApplication.tryLock("testLock").block()
+       when:
+       def result = pingApplication.tryLock("testLock").block()
 
-        then:
-        1 * lockCollection.insertOne(_) >> Mono.error(new Exception("Duplicate key"))
-        result == false
-    }
+       then:
+       1 * lockCollection.insertOne(_) >> Mono.error(new Exception("Duplicate key"))
+       result == false
+   }
 
     def "test releaseLock success"() {
         given:
@@ -89,6 +92,9 @@ class PingTest extends Specification {
         // 模拟成功删除锁
         lockCollection.deleteOne(_) >> Mono.just(Mock(DeleteResult))
 
+        // 模拟findOneAndDelete操作
+        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
+
         // 模拟WebClient成功请求
         webClient.get() >> requestHeadersUriSpec
         requestHeadersUriSpec.uri(_) >> requestHeadersUriSpec
@@ -113,6 +119,9 @@ class PingTest extends Specification {
         // 模拟锁获取失败
         lockCollection.insertOne(_) >> Mono.error(new Exception("Lock acquisition failed"))
 
+        // 模拟findOneAndDelete操作
+        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
+
         when:
         def result = pingApplication.sendPing(webClient).block()
 
@@ -136,6 +145,9 @@ class PingTest extends Specification {
         // 模拟成功删除锁
         lockCollection.deleteOne(_) >> Mono.just(Mock(DeleteResult))
 
+        // 模拟findOneAndDelete操作
+        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
+
         // 模拟WebClient成功请求
         webClient.get() >> requestHeadersUriSpec
         requestHeadersUriSpec.uri(_) >> requestHeadersUriSpec
@@ -158,7 +170,8 @@ class PingTest extends Specification {
 
         // Mock the behavior of lockCollection to simulate lock acquisition failure
         lockCollection.insertOne(_) >> Mono.error(new Exception("Lock acquisition failed"))
-
+        // 模拟findOneAndDelete操作
+        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
         when:
         def result = pingApplication.sendPing(webClient).block()
 
@@ -173,7 +186,8 @@ class PingTest extends Specification {
         def lockCollection = Mock(MongoCollection)
         def pingApp = new PingApplication()
         pingApp.lockCollection = lockCollection
-
+        // 模拟findOneAndDelete操作
+        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
         when:
         lockCollection.insertOne(_) >> Mono.error(new Exception("Lock failed"))
         def result = pingApp.sendPing(client).block()
@@ -187,7 +201,7 @@ class PingTest extends Specification {
         given:
         def pingApplication = new PingApplication()
         pingApplication.mongodbUri = "invalid_uri"
-        
+
         // 模拟日志记录器
         def logger = Mock(Logger)
         LoggerFactory.getLogger(PingApplication) >> logger
@@ -198,16 +212,16 @@ class PingTest extends Specification {
         then:
         def e = thrown(IllegalArgumentException)
         e.message.contains("The connection string is invalid")
-//        1 * logger.error({ it.contains("Failed to connect to MongoDB") })
+
     }
 
     def "test releaseLock with uninitialized lockCollection"() {
-    given:
-    def pingApplication = new PingApplication()
-        when:
-    def result = pingApplication.releaseLock("testLock").block()
-        then:
-    thrown(IllegalStateException)
+        given:
+        def pingApplication = new PingApplication()
+            when:
+        def result = pingApplication.releaseLock("testLock").block()
+            then:
+        thrown(IllegalStateException)
     }
 
     def "test startPinging"() {
@@ -221,33 +235,33 @@ class PingTest extends Specification {
         pingApplication.mongoClient = mongoClient
         pingApplication.lockCollection = mongoCollection
 
-        // 显式指定Logger的Mock类型
-        def logger = Mock(Logger)
-        LoggerFactory.getLogger(PingApplication) >> logger
+        // 创建一个 ByteArrayOutputStream 来捕获输出
+        ByteArrayOutputStream outputStream = new ByteArrayOutputStream()
+        PrintStream printStream = new PrintStream(outputStream)
+        System.setOut(printStream)
 
         when:
         pingApplication.init()
 
         then:
-
-        0 * logger.info({ it.contains("Successfully connected to MongoDB.") })
-        0 * logger.info({ it.contains("Starting pinging process.") })
+        outputStream.toString().contains("Starting pinging process.")
     }
 
     def "test sendPing without lock acquisition"() {
-    given:
-    def lockCollection = Mock(MongoCollection)
-    def webClient = Mock(WebClient)
-    def pingApplication = new PingApplication()
-    pingApplication.lockCollection = lockCollection
-    pingApplication.webClient = webClient
-        // 模拟锁获取失败
-    lockCollection.insertOne(_) >> Mono.error(new Exception("Lock acquisition failed"))
-        when:
-    def result = pingApplication.sendPing(webClient).block()
-        then:
-    result == "Rate Limited"
+        given:
+        def lockCollection = Mock(MongoCollection)
+        def webClient = Mock(WebClient)
+        def pingApplication = new PingApplication()
+        pingApplication.lockCollection = lockCollection
+        pingApplication.webClient = webClient
+        // 模拟findOneAndDelete操作
+        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
+            // 模拟锁获取失败
+        lockCollection.insertOne(_) >> Mono.error(new Exception("Lock acquisition failed"))
+            when:
+        def result = pingApplication.sendPing(webClient).block()
+            then:
+        result == "Rate Limited"
     }
-
 
 }

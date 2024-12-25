@@ -1,11 +1,13 @@
 import com.example.pong.PongController
 import org.springframework.http.HttpStatus
+import org.springframework.mock.http.server.reactive.MockServerHttpRequest
 import org.springframework.web.server.ResponseStatusException
 import reactor.core.publisher.Mono
 import spock.lang.Specification
 import spock.lang.Subject
 import java.time.Duration
 import com.example.pong.PongController
+import java.net.InetSocketAddress
 
 class PongTest extends Specification {
 
@@ -21,7 +23,10 @@ class PongTest extends Specification {
         pongController.requestCount.set(0)
 
         when:
-        Mono<String> result = pongController.pong()
+        MockServerHttpRequest request = MockServerHttpRequest.get("/pong")
+            .remoteAddress(new InetSocketAddress("localhost", 12345))
+            .build()
+        Mono<String> result = pongController.pong(request)
 
         then:
         // 验证请求计数增加了1
@@ -38,7 +43,10 @@ class PongTest extends Specification {
         pongController.requestCount.set(PongController.MAX_REQUESTS_PER_SECOND)
 
         when:
-        Mono<String> response = pongController.pong()
+        MockServerHttpRequest request = MockServerHttpRequest.get("/pong")
+            .remoteAddress(new InetSocketAddress("localhost", 12345))
+            .build()
+        Mono<String> response = pongController.pong(request)
 
         then:
         try {
@@ -60,7 +68,10 @@ class PongTest extends Specification {
         pongController.requestCount.set(0)
 
         when:
-        Mono<String> result = pongController.pong()
+        MockServerHttpRequest request = MockServerHttpRequest.get("/pong")
+            .remoteAddress(new InetSocketAddress("localhost", 12345))
+            .build()
+        Mono<String> result = pongController.pong(request)
 
         then:
         result.block(Duration.ofSeconds(2)) == "World"
@@ -76,7 +87,10 @@ class PongTest extends Specification {
         pongController.requestCount.set(PongController.MAX_REQUESTS_PER_SECOND)
 
         when:
-        Mono<String> result = pongController.pong()
+        MockServerHttpRequest request = MockServerHttpRequest.get("/pong")
+            .remoteAddress(new InetSocketAddress("localhost", 12345))
+            .build()
+        Mono<String> result = pongController.pong(request)
 
         then:
         result.block() == "World"

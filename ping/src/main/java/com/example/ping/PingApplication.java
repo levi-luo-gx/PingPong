@@ -52,20 +52,19 @@ public class PingApplication {
 	}
 
 	private void startPinging() {
-//		WebClient client = WebClient.create();
-		try {
+
 			logResult("Starting pinging process.");
 			Flux.interval(Duration.ofMillis(1000))
 					.flatMap(tick -> sendPing(webClient).subscribeOn(Schedulers.boundedElastic()))
 					.subscribe(result -> logResult("Result: " + result),
 							error -> logResult("Error: " + error.getMessage()));
-		} catch (Exception e) {
-			logResult("Error reading/writing count: " + e.getMessage());
-		}
+
 	}
 
 	private Mono<Boolean> tryLock(String lockName) {
-		return Mono.from(lockCollection.insertOne(new Document("_id", lockName)))
+		Document lockDocument = new Document("_id", lockName)
+            .append("timestamp", System.currentTimeMillis());
+		return Mono.from(lockCollection.insertOne(lockDocument))
 				.map(result -> true)
 				.onErrorResume(e -> Mono.just(false));
 	}
@@ -80,7 +79,6 @@ public class PingApplication {
 	}
 
 	private Mono<String> sendPing(WebClient client) {
-		logResult("Attempting to send ping.");
 		return tryAcquireLock("pingLock1")
 				.switchIfEmpty(tryAcquireLock("pingLock2"))
 				.defaultIfEmpty("Rate Limited")
@@ -103,7 +101,14 @@ public class PingApplication {
 	}
 
 	private Mono<String> tryAcquireLock(String lockName) {
-		return tryLock(lockName)
+		long expirationTime = System.currentTimeMillis() - 5000;
+		return Mono.from(lockCollection.findOneAndDelete(Filters.and(
+						Filters.eq("_id", lockName),
+						Filters.lt("timestamp", expirationTime)
+
+				)))
+				.defaultIfEmpty(new Document())
+				.flatMap(doc -> tryLock(lockName))
 				.flatMap(locked -> {
 					if (locked) {
 						logResult("Acquired lock: " + lockName);
@@ -120,7 +125,7 @@ public class PingApplication {
 
 	private void logResult(String message) {
 		String timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS").format(new java.util.Date());
-		System.out.println(String.format("[%s] %s",  timestamp, message));
+		System.out.printf("[%s] %s%n",  timestamp, message);
 	}
 
 }

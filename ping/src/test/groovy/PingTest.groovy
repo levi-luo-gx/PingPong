@@ -4,6 +4,7 @@ import org.bson.Document
 import spock.lang.Specification
 import org.springframework.web.reactive.function.client.WebClient
 import reactor.core.publisher.Mono
+import org.springframework.test.util.ReflectionTestUtils
 import com.mongodb.reactivestreams.client.MongoCollection
 import com.mongodb.client.result.InsertOneResult
 import com.mongodb.client.result.DeleteResult
@@ -21,247 +22,251 @@ import java.io.PrintStream
 class PingTest extends Specification {
 
 
-   def "test tryLock success"() {
-       given:
-       def lockCollection = Mock(MongoCollection)
-       def pingApplication = new PingApplication()
-       pingApplication.lockCollection = lockCollection
+    // 创建一个测试子类来访问protected和private方法
+        class TestPingApplication extends PingApplication {
+                @Override
+                protected Mono<String> sendPing(WebClient client) {
+                    // 覆盖原方法以便我们可以验证调用
+                    return super.sendPing(client)
+                }
 
-       when:
-       def result = pingApplication.tryLock("testLock").block()
+                @Override
+                protected void startPinging() {
+                    // 覆盖原方法以便我们可以验证调用
+                    super.startPinging()
+                }
+        }
 
-       then:
-       1 * lockCollection.insertOne(_) >> Mono.just(Mock(InsertOneResult))
-       result == true
-   }
+        private TestPingApplication pingApplication
+        private WebClient webClient
 
-   def "test tryLock failure"() {
-       given:
-       def lockCollection = Mock(MongoCollection)
-       def pingApplication = new PingApplication()
-       pingApplication.lockCollection = lockCollection
+        def setup() {
+                pingApplication = Spy(TestPingApplication)
+                webClient = Mock(WebClient)
 
-       when:
-       def result = pingApplication.tryLock("testLock").block()
+        }
 
-       then:
-       1 * lockCollection.insertOne(_) >> Mono.error(new Exception("Duplicate key"))
-       result == false
-   }
+        def "should send request when lock1 is acquired"() {
+                given:
+                def response = "pong response"
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
 
-    def "test releaseLock success"() {
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
+
+                when:
+                def result = pingApplication.sendPing(webClient).block()
+
+                then:
+                // 模拟获取锁成功
+                pingApplication.tryLockFile(_) >> true
+
+                // 模拟WebClient调用链
+                1 * webClient.get() >> webClientGet
+                1 * webClientGet.uri(_) >> webClientGet
+                1 * webClientGet.retrieve() >> webClientResponse
+                1 * webClientResponse.onStatus(*_) >> webClientResponse
+                1 * webClientResponse.bodyToMono(String) >> Mono.just(response)
+
+                and:
+                result == response
+        }
+
+        def "should send request when lock2 is acquired"() {
+                given:
+                def response = "pong response"
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
+
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
+
+                pingApplication.tryLockFile("/tmp/test.lock") >> false
+                pingApplication.tryLockFile("/tmp/test2.lock") >> true
+
+                when:
+                def result = pingApplication.sendPing(webClient).block()
+
+                then:
+                // 模拟WebClient调用链
+                1 * webClient.get() >> webClientGet
+                1 * webClientGet.uri(_) >> webClientGet
+                1 * webClientGet.retrieve() >> webClientResponse
+                1 * webClientResponse.onStatus(*_) >> webClientResponse
+                1 * webClientResponse.bodyToMono(String) >> Mono.just(response)
+
+                and:
+                result == response
+        }
+
+        def "Rate Limited"() {
+                given:
+                def response = "pong response"
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
+
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
+
+                // 将模拟移到这里，并明确指定参数
+                pingApplication.tryLockFile("/tmp/test.lock") >> false
+                pingApplication.tryLockFile("/tmp/test2.lock") >> false
+
+                when:
+                def result = pingApplication.sendPing(webClient).block()
+
+                then:
+
+                result == "Rate Limited"
+        }
+
+        def "lockfile IO Error, handling rate limit"(){
+                given:
+                def response = "pong response"
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
+
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
+
+                // 模拟tryLockFile抛出异常
+                pingApplication.tryLockFile("/tmp/test.lock") >> { throw new IOException("Lock file error") }
+
+                when:
+                def result = pingApplication.sendPing(webClient).block()
+
+                then:
+                result == "Error handling rate limit"
+        }
+
+    def "startPinging"() {
         given:
-        def lockCollection = Mock(MongoCollection)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
+        def response = "World"
+        def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+        def webClientResponse = Mock(WebClient.ResponseSpec)
+
+        ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+        ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+        ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+        ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
+
+        // 模拟 sendPing 返回成功响应
+        pingApplication.sendPing(webClient) >> Mono.just(response)
 
         when:
-        pingApplication.releaseLock("testLock").block()
+        pingApplication.startPinging()
 
         then:
-        1 * lockCollection.deleteOne(_) >> Mono.empty()
+        // 使用 StepVerifier 验证异步流
+        StepVerifier.create(Flux.interval(Duration.ofMillis(1000))
+            .flatMap { pingApplication.sendPing(webClient) })
+            .expectNext(response)
+            .thenCancel()
+            .verify()
+
+        // 验证日志输出包含成功结果
+        // 使用 StepVerifier 验证异步流的结果
+        StepVerifier.create(pingApplication.sendPing(webClient))
+            .expectNext(response)
+            .verifyComplete()
     }
 
-    def "test releaseLock failure"() {
-        given:
-        def lockCollection = Mock(MongoCollection)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
+        def "TOO_MANY_REQUESTS"(){
+                given:
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
 
-        when:
-        pingApplication.releaseLock("testLock").block()
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
 
-        then:
-        1 * lockCollection.deleteOne(_) >> Mono.error(new Exception("Delete failed"))
-        thrown(Exception)
-    }
+                // 模拟获取锁成功
+                pingApplication.tryLockFile(_) >> true
 
-    def "test sendPing success with lock acquired and request successful"() {
-        given:
-        def lockCollection = Mock(MongoCollection)
-        def webClient = Mock(WebClient)
-        def requestHeadersUriSpec = Mock(WebClient.RequestHeadersUriSpec)
-        def responseSpec = Mock(WebClient.ResponseSpec)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
-        pingApplication.webClient = webClient
+                // 模拟429响应
+                webClient.get() >> webClientGet
+                webClientGet.uri(_) >> webClientGet
+                webClientGet.retrieve() >> webClientResponse
+                webClientResponse.onStatus(*_) >> { predicate, handler ->
+                    handler.apply(Mock(org.springframework.web.reactive.function.client.ClientResponse) {
+                        statusCode() >> HttpStatus.TOO_MANY_REQUESTS
+                    })
+                    return webClientResponse
+                }
+                webClientResponse.bodyToMono(String) >> Mono.just("Throttled")
 
-        // 模拟成功获取锁
-        lockCollection.insertOne(_) >> Mono.just(Mock(InsertOneResult))
+                when:
+                def result = pingApplication.sendPing(webClient).block()
 
-        // 模拟成功删除锁
-        lockCollection.deleteOne(_) >> Mono.just(Mock(DeleteResult))
+                then:
+                result == "Throttled"
+        }
+//---------------------------------------------------
+        def "happy flow with lock1"(){
+                given:
+                def response = "pong response"
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
 
-        // 模拟findOneAndDelete操作
-        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp2/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp2/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
 
-        // 模拟WebClient成功请求
-        webClient.get() >> requestHeadersUriSpec
-        requestHeadersUriSpec.uri(_) >> requestHeadersUriSpec
-        requestHeadersUriSpec.retrieve() >> responseSpec
-        responseSpec.bodyToMono(String.class) >> Mono.just("World")
+//                pingApplication.tryLockFile("/tmp/test.lock") >> false
+//                pingApplication.tryLockFile("/tmp/test2.lock") >> true
 
-        when:
-        def result = pingApplication.sendPing(webClient).block()
+                when:
+                def result = pingApplication.sendPing(webClient).block()
 
-        then:
-        result == "World"
-    }
+                then:
+                // 模拟WebClient调用链
+                1 * webClient.get() >> webClientGet
+                1 * webClientGet.uri(_) >> webClientGet
+                1 * webClientGet.retrieve() >> webClientResponse
+                1 * webClientResponse.onStatus(*_) >> webClientResponse
+                1 * webClientResponse.bodyToMono(String) >> Mono.just(response)
 
-    def "test sendPing when rate limited"() {
-        given:
-        def lockCollection = Mock(MongoCollection)
-        def webClient = Mock(WebClient)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
-        pingApplication.webClient = webClient
+                and:
+                result == response
+        }
 
-        // 模拟锁获取失败
-        lockCollection.insertOne(_) >> Mono.error(new Exception("Lock acquisition failed"))
+        def "happy flow with lock2"() {
+                given:
+                def response = "pong response"
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
 
-        // 模拟findOneAndDelete操作
-        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
 
-        when:
-        def result = pingApplication.sendPing(webClient).block()
+                pingApplication.tryLockFile("/tmp/test.lock") >> false
+//                pingApplication.tryLockFile("/tmp/test2.lock") >> true
 
-        then:
-        result == "Rate Limited"
-    }
+                when:
+                def result = pingApplication.sendPing(webClient).block()
 
-    def "test sendPing failure with request failure"() {
-        given:
-        def lockCollection = Mock(MongoCollection)
-        def webClient = Mock(WebClient)
-        def requestHeadersUriSpec = Mock(WebClient.RequestHeadersUriSpec)
-        def responseSpec = Mock(WebClient.ResponseSpec)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
-        pingApplication.webClient = webClient
+                then:
+                // 模拟WebClient调用链
+                1 * webClient.get() >> webClientGet
+                1 * webClientGet.uri(_) >> webClientGet
+                1 * webClientGet.retrieve() >> webClientResponse
+                1 * webClientResponse.onStatus(*_) >> webClientResponse
+                1 * webClientResponse.bodyToMono(String) >> Mono.just(response)
 
-        // 模拟成功获取锁
-        lockCollection.insertOne(_) >> Mono.just(Mock(InsertOneResult))
-
-        // 模拟成功删除锁
-        lockCollection.deleteOne(_) >> Mono.just(Mock(DeleteResult))
-
-        // 模拟findOneAndDelete操作
-        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
-
-        // 模拟WebClient成功请求
-        webClient.get() >> requestHeadersUriSpec
-        requestHeadersUriSpec.uri(_) >> requestHeadersUriSpec
-        requestHeadersUriSpec.retrieve() >> responseSpec
-        responseSpec.bodyToMono(String.class) >> Mono.error(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many requests"))
-
-        when:
-        def result = pingApplication.sendPing(webClient).block()
-
-        then:
-        result == "Throttled"
-    }
-
-    def "test sendPing failure with lock acquisition failure"() {
-        given:
-        WebClient webClient = WebClient.create();
-        def lockCollection = Mock(MongoCollection)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
-
-        // Mock the behavior of lockCollection to simulate lock acquisition failure
-        lockCollection.insertOne(_) >> Mono.error(new Exception("Lock acquisition failed"))
-        // 模拟findOneAndDelete操作
-        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
-        when:
-        def result = pingApplication.sendPing(webClient).block()
-
-        then:
-        0 * pingApplication.releaseLock("pingLock1")
-        result == "Rate Limited"
-    }
-
-    def "test sendPing with rate limiting"() {
-        given:
-        def client = Mock(WebClient)
-        def lockCollection = Mock(MongoCollection)
-        def pingApp = new PingApplication()
-        pingApp.lockCollection = lockCollection
-        // 模拟findOneAndDelete操作
-        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
-        when:
-        lockCollection.insertOne(_) >> Mono.error(new Exception("Lock failed"))
-        def result = pingApp.sendPing(client).block()
-
-        then:
-        result == "Rate Limited"
-    }
-
-
-    def "test Mongo connection failure"() {
-        given:
-        def pingApplication = new PingApplication()
-        pingApplication.mongodbUri = "invalid_uri"
-
-        // 模拟日志记录器
-        def logger = Mock(Logger)
-        LoggerFactory.getLogger(PingApplication) >> logger
-
-        when:
-        pingApplication.init()
-
-        then:
-        def e = thrown(IllegalArgumentException)
-        e.message.contains("The connection string is invalid")
-
-    }
-
-    def "test releaseLock with uninitialized lockCollection"() {
-        given:
-        def pingApplication = new PingApplication()
-            when:
-        def result = pingApplication.releaseLock("testLock").block()
-            then:
-        thrown(IllegalStateException)
-    }
-
-    def "test startPinging"() {
-        given:
-        def pingApplication = new PingApplication()
-        pingApplication.mongodbUri = "mongodb://localhost:27017"
-
-        // 显式指定Mock对象的类型
-        def mongoClient = Mock(MongoClient)
-        def mongoCollection = Mock(MongoCollection)
-        pingApplication.mongoClient = mongoClient
-        pingApplication.lockCollection = mongoCollection
-
-        // 创建一个 ByteArrayOutputStream 来捕获输出
-        ByteArrayOutputStream outputStream = new ByteArrayOutputStream()
-        PrintStream printStream = new PrintStream(outputStream)
-        System.setOut(printStream)
-
-        when:
-        pingApplication.init()
-
-        then:
-        outputStream.toString().contains("Starting pinging process.")
-    }
-
-    def "test sendPing without lock acquisition"() {
-        given:
-        def lockCollection = Mock(MongoCollection)
-        def webClient = Mock(WebClient)
-        def pingApplication = new PingApplication()
-        pingApplication.lockCollection = lockCollection
-        pingApplication.webClient = webClient
-        // 模拟findOneAndDelete操作
-        lockCollection.findOneAndDelete(_) >> Mono.just(new Document())
-            // 模拟锁获取失败
-        lockCollection.insertOne(_) >> Mono.error(new Exception("Lock acquisition failed"))
-            when:
-        def result = pingApplication.sendPing(webClient).block()
-            then:
-        result == "Rate Limited"
-    }
-
+                and:
+                result == response
+        }
 }

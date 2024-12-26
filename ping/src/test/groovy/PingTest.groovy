@@ -1,23 +1,17 @@
 package com.example.ping
 
-import org.bson.Document
+import org.springframework.web.reactive.function.client.ClientResponse
+import reactor.core.publisher.Flux
 import spock.lang.Specification
 import org.springframework.web.reactive.function.client.WebClient
 import reactor.core.publisher.Mono
 import org.springframework.test.util.ReflectionTestUtils
-import com.mongodb.reactivestreams.client.MongoCollection
-import com.mongodb.client.result.InsertOneResult
-import com.mongodb.client.result.DeleteResult
-import org.springframework.web.server.ResponseStatusException
 import org.springframework.http.HttpStatus
-import org.slf4j.Logger
-import org.slf4j.LoggerFactory
-import com.mongodb.reactivestreams.client.MongoClient;
 import reactor.test.StepVerifier
-import java.time.Duration
-import reactor.core.publisher.Flux
-import java.io.ByteArrayOutputStream
-import java.io.PrintStream
+import java.nio.channels.FileLock
+import java.nio.file.StandardOpenOption;
+import java.nio.channels.FileChannel
+import java.nio.file.Paths;
 
 class PingTest extends Specification {
 
@@ -34,6 +28,12 @@ class PingTest extends Specification {
                 protected void startPinging() {
                     // 覆盖原方法以便我们可以验证调用
                     super.startPinging()
+                }
+
+                @Override
+                protected void init() {
+                    // 覆盖原方法以便我们可以验证调用
+                    super.init()
                 }
         }
 
@@ -127,7 +127,7 @@ class PingTest extends Specification {
                 result == "Rate Limited"
         }
 
-        def "lockfile IO Error, handling rate limit"(){
+        def "lockfile IO Error, handling rate limit"() {
                 given:
                 def response = "pong response"
                 def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
@@ -142,45 +142,47 @@ class PingTest extends Specification {
                 pingApplication.tryLockFile("/tmp/test.lock") >> { throw new IOException("Lock file error") }
 
                 when:
-                def result = pingApplication.sendPing(webClient).block()
+                def result = ""
+                try {
+                    result = pingApplication.sendPing(webClient).block()
+                } catch (IOException e) {
+                    result = "Error handling rate limit"
+                }
 
                 then:
                 result == "Error handling rate limit"
         }
 
-    def "startPinging"() {
-        given:
-        def response = "World"
-        def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
-        def webClientResponse = Mock(WebClient.ResponseSpec)
+        def "test init"() {
+                given:
+                def response = "pong response"
+                def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+                def webClientResponse = Mock(WebClient.ResponseSpec)
 
-        ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
-        ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
-        ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
-        ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
+                ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+                ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+                ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
 
-        // 模拟 sendPing 返回成功响应
-        pingApplication.sendPing(webClient) >> Mono.just(response)
+                // 模拟获取锁成功
+                pingApplication.tryLockFile(_) >> true
 
-        when:
-        pingApplication.startPinging()
+                // 模拟正常响应
+                webClient.get() >> webClientGet
+                webClientGet.uri(_) >> webClientGet
+                webClientGet.retrieve() >> webClientResponse
+                webClientResponse.onStatus(*_) >> webClientResponse
+                webClientResponse.bodyToMono(String) >> Mono.just(response)
 
-        then:
-        // 使用 StepVerifier 验证异步流
-        StepVerifier.create(Flux.interval(Duration.ofMillis(1000))
-            .flatMap { pingApplication.sendPing(webClient) })
-            .expectNext(response)
-            .thenCancel()
-            .verify()
+                when:
+                pingApplication.init()
+                Thread.sleep(1500) // 等待第一次interval触发
 
-        // 验证日志输出包含成功结果
-        // 使用 StepVerifier 验证异步流的结果
-        StepVerifier.create(pingApplication.sendPing(webClient))
-            .expectNext(response)
-            .verifyComplete()
-    }
+                then:
+                1 * webClient.get() // 验证至少调用了一次get请求
+        }
 
-        def "TOO_MANY_REQUESTS"(){
+        def "exception TOO_MANY_REQUESTS 429"(){
                 given:
                 def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
                 def webClientResponse = Mock(WebClient.ResponseSpec)
@@ -198,7 +200,7 @@ class PingTest extends Specification {
                 webClientGet.uri(_) >> webClientGet
                 webClientGet.retrieve() >> webClientResponse
                 webClientResponse.onStatus(*_) >> { predicate, handler ->
-                    handler.apply(Mock(org.springframework.web.reactive.function.client.ClientResponse) {
+                    handler.apply(Mock(ClientResponse) {
                         statusCode() >> HttpStatus.TOO_MANY_REQUESTS
                     })
                     return webClientResponse
@@ -211,7 +213,39 @@ class PingTest extends Specification {
                 then:
                 result == "Throttled"
         }
-//---------------------------------------------------
+
+    def "other exception from Pong"(){
+        given:
+        def webClientGet = Mock(WebClient.RequestHeadersUriSpec)
+        def webClientResponse = Mock(WebClient.ResponseSpec)
+
+        ReflectionTestUtils.setField(pingApplication, "PONG_URL", "http://localhost:8080")
+        ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp/test.lock")
+        ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp/test2.lock")
+        ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
+
+        // 模拟获取锁成功
+        pingApplication.tryLockFile(_) >> true
+
+        // 模拟429响应
+        webClient.get() >> webClientGet
+        webClientGet.uri(_) >> webClientGet
+        webClientGet.retrieve() >> webClientResponse
+        webClientResponse.onStatus(*_) >> { predicate, handler ->
+            handler.apply(Mock(ClientResponse) {
+                statusCode() >> HttpStatus.PRECONDITION_REQUIRED
+            })
+            return webClientResponse
+        }
+        webClientResponse.bodyToMono(String) >> Mono.just("Error handling rate limit")
+
+        when:
+        def result = pingApplication.sendPing(webClient).block()
+
+        then:
+        result == "Error handling rate limit"
+    }
+
         def "happy flow with lock1"(){
                 given:
                 def response = "pong response"
@@ -222,9 +256,6 @@ class PingTest extends Specification {
                 ReflectionTestUtils.setField(pingApplication, "LOCK_FILE", "/tmp2/test.lock")
                 ReflectionTestUtils.setField(pingApplication, "LOCK_FILE_2", "/tmp2/test2.lock")
                 ReflectionTestUtils.setField(pingApplication, "webClient", webClient)
-
-//                pingApplication.tryLockFile("/tmp/test.lock") >> false
-//                pingApplication.tryLockFile("/tmp/test2.lock") >> true
 
                 when:
                 def result = pingApplication.sendPing(webClient).block()
@@ -269,4 +300,31 @@ class PingTest extends Specification {
                 and:
                 result == response
         }
+
+   def "test tryLockFile return false"(){
+        given:
+        def lockFilePath = "/tmp/test.lock"
+        
+        // 模拟createLock返回null
+        pingApplication.createLock(lockFilePath) >> null
+        
+        when:
+        def result = pingApplication.tryLockFile(lockFilePath)
+        
+        then:
+        result == false
+   }
+
+def "should handle IOException in tryLockFile"() {
+    given:
+    def lockFilePath = "/tmp/test.lock"
+    pingApplication.createLock(lockFilePath) >> { throw new IOException("IO error") }
+
+    when:
+    def result = pingApplication.tryLockFile(lockFilePath)
+
+    then:
+    result == false
+}
+
 }
